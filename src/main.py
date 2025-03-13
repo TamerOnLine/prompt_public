@@ -1,111 +1,121 @@
-"""
-This script uses LangChain's Ollama model to generate similarity search guides 
-for different data types using FAISS. The script:
-- Initializes the Ollama model.
-- Uses a ChatPromptTemplate to generate responses dynamically.
-- Iterates over different data types and saves AI-generated responses in markdown files.
-"""
-
+import os
+import re
+import time
+import logging
+import sqlite3
 from langchain_ollama import ChatOllama
 from langchain.prompts import ChatPromptTemplate
+import webbrowser
 
-
-# Initialize the local Ollama model
-llm = ChatOllama(model="mistral", temperature=0.7)
-
-# Define the chat prompt template for FAISS-based similarity search
-chat_template = ChatPromptTemplate.from_messages([
-    ("system", "You are an assistant specialized in similarity search using FAISS."),
-    ("user", "How can I use FAISS to perform similarity search on {data_type} data?\n\n"
-             "Please provide a detailed step-by-step guide, including data preprocessing, "
-             "vectorization, indexing, and searching.")
-])
-
-# Dictionary of data types with explanations for FAISS
-data_types = {
-    "text": (
-        "Text data can be converted into embeddings using models like Word2Vec, TF-IDF, or BERT. "
-        "These embeddings can be indexed in FAISS for fast similarity search."
-    ),
-    "images": (
-        "Images can be represented as feature vectors using CNNs (e.g., ResNet, VGG). "
-        "These vectors can be stored in FAISS and used to retrieve similar images."
-    ),
-    "audio": (
-        "Audio files can be converted into feature vectors using MFCCs, spectrograms, or deep learning embeddings. "
-        "FAISS can then be used for quick similarity search in large audio datasets."
-    ),
-    "video": (
-        "Videos can be processed by extracting key frames and converting them into feature vectors using CNNs. "
-        "FAISS can store these feature vectors to enable video similarity search."
-    ),
-    "medical": (
-        "Medical images (like MRIs, CT scans) can be processed using CNNs to generate feature embeddings. "
-        "FAISS can store and retrieve similar scans efficiently."
-    ),
-    "tabular": (
-        "Tabular data can be transformed into numerical vectors using dimensionality reduction techniques "
-        "(e.g., PCA, t-SNE). FAISS enables searching for similar records."
-    ),
-    "geospatial": (
-        "Geospatial data (e.g., coordinates, maps) can be embedded using specialized techniques "
-        "(e.g., spatial embeddings). FAISS enables quick geospatial similarity retrieval."
-    ),
-    "AI embeddings": (
-        "Deep learning embeddings from models like GPT, BERT, or custom ML models can be stored in FAISS. "
-        "This enables efficient search for similar AI-generated features."
+def setup_logging():
+    """Configure logging with detailed error messages."""
+    logging.basicConfig(
+        filename="app.log",
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
     )
-}
 
+def setup_database():
+    """Initialize the SQLite database to store responses."""
+    conn = sqlite3.connect("responses.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT,
+            tool TEXT,
+            explanation_style TEXT,
+            accuracy_level TEXT,
+            response_text TEXT,
+            reference_link TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-def generate_faiss_guides():
-    """
-    Generates FAISS similarity search guides for different data types using LangChain's Ollama model.
-    - Iterates over the defined data types.
-    - Uses an AI model to generate responses.
-    - Saves responses in markdown files.
-    """
-    for data_type, explanation in data_types.items():
-        try:
-            # Format the prompt with the current data type
-            prompt_filled = chat_template.format(data_type=data_type)
+def generate_reference_link(topic, tool):
+    """Generate a dynamic reference link based on the topic and tool."""
+    base_url = "https://www.google.com/search?q="
+    query = f"{topic}+{tool}+tutorial"
+    return base_url + query.replace(" ", "+")
 
-            # Invoke the Ollama model to generate a response
-            response = llm.invoke(prompt_filled)
+def store_response(topic, tool, explanation_style, accuracy_level, response_text):
+    """Store AI responses in SQLite database with a reference link."""
+    reference_link = generate_reference_link(topic, tool)
+    conn = sqlite3.connect("responses.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO responses (topic, tool, explanation_style, accuracy_level, response_text, reference_link)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (topic, tool, explanation_style, accuracy_level, response_text, reference_link))
+    conn.commit()
+    conn.close()
+    return reference_link
 
-            # Extract the response content
-            response_text = response.content.strip() if hasattr(response, "content") else None
+def get_past_responses():
+    """Retrieve past responses from the database."""
+    conn = sqlite3.connect("responses.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, topic, tool, response_text, reference_link, timestamp FROM responses ORDER BY timestamp DESC")
+    records = cursor.fetchall()
+    conn.close()
+    return records
 
-            if response_text:
-                # Format the response
-                final_response = (
-                    f"### 🔍 Similarity Search on {data_type.capitalize()} Data using FAISS\n\n"
-                    f"**📌 Overview:** {explanation}\n\n"
-                    f"**📖 Step-by-step Guide:**\n\n{response_text}\n\n"
-                    "---\n*Generated by AI*"
-                )
+def generate_response(llm, prompt):
+    """Generate AI response."""
+    try:
+        response = llm.invoke(prompt)
+        return response.content.strip() if hasattr(response, "content") else None
+    except Exception as error:
+        logging.error("Error while generating response: %s", str(error))
+        return None
 
-                # Print the formatted response
-                print("\n" + "=" * 50)
-                print(f"🔍 AI Response - Similarity Search on {data_type.capitalize()} using FAISS 🔍")
-                print("=" * 50 + "\n")
-                print(final_response)
-                print("\n" + "=" * 50)
+def main():
+    """Main function to run the assistant."""
+    setup_logging()
+    setup_database()
+    
+    model_name = input("Enter AI model name (default: mistral): ").strip() or "mistral"
+    llm = ChatOllama(model=model_name, temperature=0.9)
+    
+    topic = input("Enter the topic of interest: ").strip()
+    tool = input("Enter the tool/method: ").strip()
+    explanation_style = input("Preferred explanation style ('brief', 'detailed', 'step-by-step')? ").strip().lower()
+    accuracy_level = input("Choose response accuracy level ('Low', 'Medium', 'High'): ").strip().capitalize()
+    
+    if accuracy_level not in ["Low", "Medium", "High"]:
+        logging.warning("Invalid accuracy level entered. Defaulting to 'Medium'.")
+        accuracy_level = "Medium"
+    
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", f"You are an AI assistant. The user is interested in {topic} using {tool}. Prefers {explanation_style} explanation. Accuracy: {accuracy_level}.")
+    ])
+    
+    prompt_filled = prompt_template.format(
+        topic=topic, tool=tool, explanation_style=explanation_style, accuracy_level=accuracy_level
+    )
+    
+    response_text = generate_response(llm, prompt_filled)
+    
+    if response_text:
+        reference_link = store_response(topic, tool, explanation_style, accuracy_level, response_text)
+        print("\n📚 AI Response:")
+        print("=" * 50)
+        print(response_text)
+        print("=" * 50)
+        print(f"🔗 Reference: {reference_link}")
+        print("✅ Response saved in database.")
+    else:
+        print("❌ Failed to generate AI response.")
+    
+    # Fetch past responses
+    past_responses = get_past_responses()
+    print("\n📜 Past Responses:")
+    for rec in past_responses[:5]:  # Show last 5 responses
+        print(f"[{rec[0]}] {rec[1]} using {rec[2]} - {rec[5]}\n{rec[3][:200]}...")  # Truncate response for display
+        print(f"🔗 Reference: {rec[4]}")
+        print("-" * 50)
 
-                # Save the response to a Markdown file
-                md_filename = f"{data_type.lower()}_faiss_similarity_search.md"
-                with open(md_filename, "w", encoding="utf-8") as file:
-                    file.write(final_response)
-
-                print(f"\n✅ The response has been saved to '{md_filename}'.")
-            else:
-                print(f"⚠️ No valid response received for {data_type}.")
-
-        except Exception as e:
-            print(f"❌ Error processing {data_type}: {e}")
-
-
-# Execute the guide generation function
 if __name__ == "__main__":
-    generate_faiss_guides()
-
+    main()
