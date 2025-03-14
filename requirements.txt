@@ -4,4 +4,6 @@ requests
 langchain-community
 langchain-ollama
 langchain_ollama
+googlesearch-python
+beautifulsoup4
 

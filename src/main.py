@@ -1,121 +1,97 @@
-import os
-import re
-import time
 import logging
-import sqlite3
+from ai_agent import initialize_ai_agent 
+from database import setup_database, store_response
+from utils import setup_logging, save_to_markdown
+from config import DEFAULT_MODEL
 from langchain_ollama import ChatOllama
 from langchain.prompts import ChatPromptTemplate
-import webbrowser
-
-def setup_logging():
-    """Configure logging with detailed error messages."""
-    logging.basicConfig(
-        filename="app.log",
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-
-def setup_database():
-    """Initialize the SQLite database to store responses."""
-    conn = sqlite3.connect("responses.db")
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS responses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            topic TEXT,
-            tool TEXT,
-            explanation_style TEXT,
-            accuracy_level TEXT,
-            response_text TEXT,
-            reference_link TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def generate_reference_link(topic, tool):
-    """Generate a dynamic reference link based on the topic and tool."""
-    base_url = "https://www.google.com/search?q="
-    query = f"{topic}+{tool}+tutorial"
-    return base_url + query.replace(" ", "+")
-
-def store_response(topic, tool, explanation_style, accuracy_level, response_text):
-    """Store AI responses in SQLite database with a reference link."""
-    reference_link = generate_reference_link(topic, tool)
-    conn = sqlite3.connect("responses.db")
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO responses (topic, tool, explanation_style, accuracy_level, response_text, reference_link)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (topic, tool, explanation_style, accuracy_level, response_text, reference_link))
-    conn.commit()
-    conn.close()
-    return reference_link
-
-def get_past_responses():
-    """Retrieve past responses from the database."""
-    conn = sqlite3.connect("responses.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, topic, tool, response_text, reference_link, timestamp FROM responses ORDER BY timestamp DESC")
-    records = cursor.fetchall()
-    conn.close()
-    return records
-
-def generate_response(llm, prompt):
-    """Generate AI response."""
-    try:
-        response = llm.invoke(prompt)
-        return response.content.strip() if hasattr(response, "content") else None
-    except Exception as error:
-        logging.error("Error while generating response: %s", str(error))
-        return None
 
 def main():
-    """Main function to run the assistant."""
     setup_logging()
     setup_database()
     
-    model_name = input("Enter AI model name (default: mistral): ").strip() or "mistral"
-    llm = ChatOllama(model=model_name, temperature=0.9)
-    
+
+    model_name = input("Enter AI model name (default: mistral): ").strip() or DEFAULT_MODEL
+    temperature = float(input("Enter temperature (default: 0.1): ").strip() or 0.1)
+
+
+    agent = initialize_ai_agent(model_name)
+
     topic = input("Enter the topic of interest: ").strip()
-    tool = input("Enter the tool/method: ").strip()
-    explanation_style = input("Preferred explanation style ('brief', 'detailed', 'step-by-step')? ").strip().lower()
-    accuracy_level = input("Choose response accuracy level ('Low', 'Medium', 'High'): ").strip().capitalize()
-    
-    if accuracy_level not in ["Low", "Medium", "High"]:
-        logging.warning("Invalid accuracy level entered. Defaulting to 'Medium'.")
-        accuracy_level = "Medium"
-    
+    tools_list = agent.get_relevant_tools(topic)  # استدعاء الدالة من داخل الكائن
+
+    if not tools_list:
+        print("❌ No relevant tools found. Try another topic.")
+        return
+
+    print("\n🔹 Relevant tools/people/books for your topic:")
+    for idx, tool in enumerate(tools_list, start=1):
+        print(f"{idx}. {tool}")
+
+    while True:
+        try:
+            choice = int(input("\nEnter the number of the tool/method you want to explore: ")) - 1
+            if 0 <= choice < len(tools_list):
+                tool = tools_list[choice]
+                break
+            else:
+                print("❌ Invalid choice. Please choose a valid number.")
+        except ValueError:
+            print("❌ Please enter a valid number.")
+
+    print("\nSelect preferred explanation style:")
+    explanation_styles = ["Brief", "Detailed", "Step-by-step"]
+    for idx, style in enumerate(explanation_styles, start=1):
+        print(f"{idx}. {style}")
+
+    while True:
+        try:
+            explanation_choice = int(input("Enter the number of preferred explanation style: ")) - 1
+            if 0 <= explanation_choice < len(explanation_styles):
+                explanation_style = explanation_styles[explanation_choice]
+                break
+            else:
+                print("❌ Invalid choice. Please choose a valid number.")
+        except ValueError:
+            print("❌ Please enter a valid number.")
+
+    print("\nChoose response accuracy level:")
+    accuracy_levels = ["Low", "Medium", "High"]
+    for idx, level in enumerate(accuracy_levels, start=1):
+        print(f"{idx}. {level}")
+
+    while True:
+        try:
+            accuracy_choice = int(input("Enter the number of accuracy level: ")) - 1
+            if 0 <= accuracy_choice < len(accuracy_levels):
+                accuracy_level = accuracy_levels[accuracy_choice]
+                break
+            else:
+                print("❌ Invalid choice. Please choose a valid number.")
+        except ValueError:
+            print("❌ Please enter a valid number.")
+
+    print(f"\n🔍 Exploring {tool} in relation to {topic}...")
+
     prompt_template = ChatPromptTemplate.from_messages([
-        ("system", f"You are an AI assistant. The user is interested in {topic} using {tool}. Prefers {explanation_style} explanation. Accuracy: {accuracy_level}.")
+        ("system", f"You are an AI assistant. The user is interested in {topic} using {tool}. "
+                   f"Provide a {explanation_style.lower()} explanation with {accuracy_level.lower()} accuracy.")
     ])
-    
-    prompt_filled = prompt_template.format(
-        topic=topic, tool=tool, explanation_style=explanation_style, accuracy_level=accuracy_level
-    )
-    
-    response_text = generate_response(llm, prompt_filled)
-    
+
+    response_text = agent.generate_response(topic, tool)
+
     if response_text:
-        reference_link = store_response(topic, tool, explanation_style, accuracy_level, response_text)
+        reference_link = store_response(topic, tool, response_text)
+        save_to_markdown(topic, tool, response_text, reference_link)
+
         print("\n📚 AI Response:")
         print("=" * 50)
         print(response_text)
         print("=" * 50)
         print(f"🔗 Reference: {reference_link}")
-        print("✅ Response saved in database.")
+        print("✅ Response saved in database and a unique Markdown file in 'save_md/'.")
     else:
         print("❌ Failed to generate AI response.")
-    
-    # Fetch past responses
-    past_responses = get_past_responses()
-    print("\n📜 Past Responses:")
-    for rec in past_responses[:5]:  # Show last 5 responses
-        print(f"[{rec[0]}] {rec[1]} using {rec[2]} - {rec[5]}\n{rec[3][:200]}...")  # Truncate response for display
-        print(f"🔗 Reference: {rec[4]}")
-        print("-" * 50)
 
 if __name__ == "__main__":
     main()
